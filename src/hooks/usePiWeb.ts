@@ -335,6 +335,20 @@ function pathKey(value: string): string {
 		: normalized;
 }
 
+/**
+ * 401 = 会话凭据失效（piweb 每次重启会换签名密钥，旧 Cookie 全部作废）。
+ * 不处理的话发送静默失败、实时流静默断线，页面对用户表现成「卡死」；
+ * 这里跳到登录页（带 next 回跳），登录后回到原位。全局只跳一次：
+ * 登录跳转期间其它在途请求再收到 401 不能反复触发导航。
+ */
+let authRedirectStarted = false;
+function redirectToLogin(): void {
+	if (authRedirectStarted || typeof window === "undefined") return;
+	authRedirectStarted = true;
+	const next = encodeURIComponent(window.location.pathname + window.location.search);
+	window.location.href = `/login?next=${next}`;
+}
+
 export function usePiWeb() {
 	const [sessions, setSessions] = useState<SessionListItem[]>([]);
 	const [sessionListError, setSessionListError] = useState<string | null>(null);
@@ -601,6 +615,10 @@ export function usePiWeb() {
 			controller = new AbortController();
 			try {
 				const r = await fetch("/api/sessions", { signal: controller.signal, headers: lastEtag ? { "If-None-Match": lastEtag } : undefined });
+				if (r.status === 401) {
+					redirectToLogin();
+					return;
+				}
 				if (r.status === 304) {
 					if (alive) setSessionListError(null);
 					return;
@@ -781,6 +799,10 @@ export function usePiWeb() {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(cmd),
 			});
+			if (r.status === 401) {
+				redirectToLogin();
+				return { success: false, error: "authentication required" };
+			}
 			const result = await r.json();
 			if (!r.ok || !result.success) setState((s) => ({ ...s, error: result.error || `request failed (${r.status})` }));
 			return result;
