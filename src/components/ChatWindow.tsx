@@ -32,6 +32,7 @@ import { ChatScrollContext, type ChatScroll } from "@/components/chat/chat-scrol
 import { useI18n } from "@/i18n";
 import type { ToolCardState } from "@/hooks/usePiWeb";
 import type { ContextResource, TrajEntry, TrajTokens, WebContent, WebMessage, WebStats } from "@/lib/types";
+import type { StreamMetrics } from "@/lib/stream-metrics";
 import {
 	classifyModelError,
 	cleanCommand,
@@ -700,17 +701,37 @@ function ContextStep({ resource, cwd }: { resource: ContextResource | string; cw
 
 // ---------- 工作指示：π 记号 + 英文状态词闪光（没有正在进行的步骤时）或「Working for 12s」；整行固定英文 ----------
 
-function WorkingStep({ startedAt, outputTokens, workingMessage, hasLiveStep }: { startedAt: number; outputTokens?: number; workingMessage?: string | null; hasLiveStep: boolean }) {
+/** 流式卡住判定：超过这个时长没有任何新数据、且没有工具在跑，就当作网络/服务端卡顿 */
+const NET_STALL_MS = 3000;
+
+function WorkingStep({ startedAt, outputTokens, workingMessage, hasLiveStep, toolRunning, getMetrics }: { startedAt: number; outputTokens?: number; workingMessage?: string | null; hasLiveStep: boolean; toolRunning?: boolean; getMetrics?: () => StreamMetrics }) {
+	const { t } = useI18n();
 	const elapsed = useElapsed(startedAt, true);
 	const verb = WORKING_VERBS[Math.floor(elapsed / 3000) % WORKING_VERBS.length];
 	// 扩展可以用 setWorkingMessage 覆盖这行文案（pi 终端同款能力）；有步骤在闪光时这里只报时长
 	const label = workingMessage || (hasLiveStep ? null : `${verb}…`);
+	// 流式吞吐：用客户端实测的 token/s 与入站速率（网速）替代只显示一个累计 token 数。
+	// 同步读取、不写 state，所以不会额外触发渲染。
+	const metrics = getMetrics?.() ?? null;
+	const idleMs = metrics?.idleMs ?? 0;
+	// 没有工具在跑却长时间收不到任何数据 → 显式提示「网络等待」，把网络问题的弱反馈补上。
+	// 注意用 toolRunning 而不是 hasLiveStep：正文在流式时 hasLiveStep 也为 true，会把这个提示吞掉。
+	const stalled = metrics !== null && !toolRunning && idleMs >= NET_STALL_MS;
 	return (
 		<Step kind="work" tone="live" live>
 			<div className="pw-line">
 				{label ? <span className="pw-shimmer">{label}</span> : <span className="pw-verb">{fillBold(WORKING_FOR, { d: fmtSpan(elapsed) })}</span>}
 				{label && <span className="pw-meta">{fmtSpan(elapsed)}</span>}
-				{outputTokens ? <span className="pw-meta">↓ {fmtTok(outputTokens)} tokens</span> : null}
+				{stalled ? (
+					<span className="pw-net-wait">{t.netWaiting.replace("{d}", fmtSpan(idleMs))}</span>
+				) : metrics && metrics.tokensPerSecond > 0 ? (
+					<>
+						<span className="pw-meta" title={t.outputTokens}>↓ {fmtThroughput(metrics.tokensPerSecond)} tok/s</span>
+						{metrics.bytesPerSecond > 0 && <span className="pw-meta pw-net-rate">· {fmtBytesRate(metrics.bytesPerSecond)}</span>}
+					</>
+				) : outputTokens ? (
+					<span className="pw-meta">↓ {fmtTok(outputTokens)} tok</span>
+				) : null}
 			</div>
 		</Step>
 	);
@@ -1042,6 +1063,7 @@ function TurnBlockView({
 	runningTool,
 	outputTokens,
 	workingMessage,
+	getMetrics,
 	onFork,
 	onEditMessage,
 	roundBadge,
@@ -1062,6 +1084,7 @@ function TurnBlockView({
 	runningTool?: string;
 	outputTokens?: number;
 	workingMessage?: string | null;
+	getMetrics?: () => StreamMetrics;
 	onFork?: (entryId: string) => void;
 	/** 编辑该回合的用户消息并重新发送（模型从这条消息重新回答） */
 	onEditMessage?: (entryId: string, text: string) => void;
@@ -1144,7 +1167,7 @@ function TurnBlockView({
 						);
 					})}
 					{isLast && retryNotice && <RetryStep text={retryNotice} />}
-					{turnLive && streamStartedAt && <WorkingStep startedAt={streamStartedAt} outputTokens={outputTokens} workingMessage={workingMessage} hasLiveStep={hasLiveStep} />}
+					{turnLive && streamStartedAt && <WorkingStep startedAt={streamStartedAt} outputTokens={outputTokens} workingMessage={workingMessage} hasLiveStep={hasLiveStep} toolRunning={Boolean(runningTool)} getMetrics={getMetrics} />}
 				</div>
 			)}
 			{finalIdx >= 0 && <FinalAnswer message={messages[finalIdx]} onFork={onFork} showActions={!isStreaming || !isLast} turnStartMs={user?.timestamp} roundBadge={roundBadge} onShowRound={onShowRound} />}
@@ -1257,6 +1280,13 @@ function fmtDuration(ms: number): string {
 
 function fmtThroughput(tokensPerSecond: number): string {
 	return tokensPerSecond >= 10 ? String(Math.round(tokensPerSecond)) : String(Math.round(tokensPerSecond * 10) / 10);
+}
+
+/** 入站速率（网速）：B/s → KB/s → MB/s */
+function fmtBytesRate(bytesPerSecond: number): string {
+	if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+	if (bytesPerSecond >= 1024) return `${Math.round(bytesPerSecond / 1024)} KB/s`;
+	return `${Math.round(bytesPerSecond)} B/s`;
 }
 
 export function SessionStatsBar({
@@ -1391,6 +1421,7 @@ export function ChatWindow({
 	compaction,
 	onClearCompaction,
 	workingMessage,
+	getStreamMetrics,
 	stats,
 	onOpenTrajectory,
 	onOpenFile,
@@ -1414,6 +1445,8 @@ export function ChatWindow({
 	onClearCompaction?: () => void;
 	/** 扩展覆盖的工作中文案（setWorkingMessage） */
 	workingMessage?: string | null;
+	/** 流式吞吐（token/s、网速、卡顿）：同步读取、不触发渲染 */
+	getStreamMetrics?: () => StreamMetrics;
 	/** 会话统计：工作指示里显示本轮输出 token */
 	stats?: WebStats | null;
 	/** 轨迹条目：用于把工具行链接到轨迹 inspector */
@@ -1692,6 +1725,7 @@ export function ChatWindow({
 										runningTool={runningTool}
 										outputTokens={stats?.tokens.output}
 										workingMessage={workingMessage}
+										getMetrics={getStreamMetrics}
 										onFork={onFork}
 										onEditMessage={onEditMessage}
 										roundBadge={turn.userIndex >= 0 ? roundBadges?.get(messages[turn.userIndex].id ?? "") : undefined}
@@ -1707,7 +1741,7 @@ export function ChatWindow({
 						{/* 还没有任何消息就已在流式（极少见）：单独给一条工作指示 */}
 						{isStreaming && streamStartedAt && turns.length === 0 && (
 							<div className="pw-turn">
-								<WorkingStep startedAt={streamStartedAt} outputTokens={stats?.tokens.output} workingMessage={workingMessage} hasLiveStep={Boolean(runningTool)} />
+								<WorkingStep startedAt={streamStartedAt} outputTokens={stats?.tokens.output} workingMessage={workingMessage} getMetrics={getStreamMetrics} hasLiveStep={Boolean(runningTool)} toolRunning={Boolean(runningTool)} />
 							</div>
 						)}
 						{/* 重连提示：跟随消息流显示在最后一条输出下面 */}

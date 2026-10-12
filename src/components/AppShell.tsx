@@ -95,6 +95,7 @@ export function AppShell() {
 		archiveSession,
 		unarchiveSession,
 		resync,
+		getStreamMetrics,
 		groupBy,
 		orderBy,
 		setGroupBy,
@@ -925,6 +926,7 @@ export function AppShell() {
 									compaction={state.compaction}
 									onClearCompaction={clearCompaction}
 									workingMessage={state.workingMessage}
+									getStreamMetrics={getStreamMetrics}
 									stats={snapshot?.stats ?? null}
 									trajectory={snapshot?.trajectory ?? []}
 									cwd={panelCwd}

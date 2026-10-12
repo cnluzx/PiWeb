@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pollEventStream, usesEventPolling } from "@/lib/chat/event-stream";
 import { createEventBatcher, type EventBatcher } from "@/lib/event-batcher";
+import { createStreamMetrics, type StreamMetrics } from "@/lib/stream-metrics";
 import type {
 	GrowthConsentRequest,
 	GrowthRound,
@@ -16,6 +17,9 @@ import type {
 	WebSnapshot,
 	ToolPreset,
 } from "@/lib/types";
+
+/** 流式吞吐埋点：计事件负载字节用；复用同一个实例，避免每条消息新建 */
+const streamEncoder = new TextEncoder();
 
 export interface ToolCardState {
 	name: string;
@@ -358,6 +362,8 @@ export function usePiWeb() {
 	const [state, setState] = useState<PiWebState>(emptyState);
 	/** 当前 SSE 连接的增量批量器：按帧合并事件，避免每个 token 一次整树渲染 */
 	const batcherRef = useRef<EventBatcher<WebEvent> | null>(null);
+	/** 流式吞吐度量（token/s、网速、卡顿）：跨渲染稳定，供「正在输出」指示器按需读取（不触发重渲染） */
+	const streamMetrics = useMemo(() => createStreamMetrics(), []);
 	const [models, setModels] = useState<{ providers: any[]; models: any[] } | null>(null);
 	const [addedWorkspaces, setAddedWorkspaces] = useState<string[]>([]);
 	const [removedWorkspaces, setRemovedWorkspaces] = useState<string[]>([]);
@@ -690,6 +696,8 @@ export function usePiWeb() {
 			setState(emptyState(savedToolPreset()));
 			return;
 		}
+		// 换会话/强制重连：吞吐统计清零
+		streamMetrics.reset();
 		const reconnectingCurrentSession = subscribedSessionRef.current === currentId;
 		subscribedSessionRef.current = currentId;
 		setState((current) => reconnectingCurrentSession
@@ -715,6 +723,12 @@ export function usePiWeb() {
 					// 单帧损坏（代理截断等）只丢弃该帧，不能让 EventSource 回调抛异常
 					return;
 				}
+				// 吞吐埋点：负载字节（网速）+ delta 新增字符（估算 token）
+				streamMetrics.record(
+					streamEncoder.encode(data).length,
+					parsed.type === "delta" && typeof parsed.delta === "string" ? parsed.delta.length : 0,
+					Date.now(),
+				);
 				if (parsed.type === "snapshot" && parsed.snapshot) {
 					// 快照是权威状态：之前缓冲的增量已经过时，直接丢弃
 					batcher.cancel();
@@ -782,7 +796,10 @@ export function usePiWeb() {
 			esRef.current?.close();
 			esRef.current = null;
 		};
-	}, [currentId, resyncNonce]);
+	}, [currentId, resyncNonce, streamMetrics]);
+
+	/** 取一份当前流式吞吐快照（同步、无副作用，不触发渲染） */
+	const getStreamMetrics = useCallback((): StreamMetrics => streamMetrics.snapshot(Date.now()), [streamMetrics]);
 
 	const sendCommand = useCallback(async (cmd: Record<string, unknown>, id?: string): Promise<any> => {
 		const target = id ?? currentId;
@@ -1014,6 +1031,7 @@ export function usePiWeb() {
 		archiveSession,
 		unarchiveSession,
 		resync,
+		getStreamMetrics,
 		groupBy,
 		orderBy,
 		setGroupBy,
