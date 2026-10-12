@@ -701,37 +701,21 @@ function ContextStep({ resource, cwd }: { resource: ContextResource | string; cw
 
 // ---------- 工作指示：π 记号 + 英文状态词闪光（没有正在进行的步骤时）或「Working for 12s」；整行固定英文 ----------
 
-/** 流式卡住判定：超过这个时长没有任何新数据、且没有工具在跑，就当作网络/服务端卡顿 */
-const NET_STALL_MS = 3000;
-
-function WorkingStep({ startedAt, outputTokens, workingMessage, hasLiveStep, toolRunning, getMetrics }: { startedAt: number; outputTokens?: number; workingMessage?: string | null; hasLiveStep: boolean; toolRunning?: boolean; getMetrics?: () => StreamMetrics }) {
+function WorkingStep({ startedAt, workingMessage, hasLiveStep, getMetrics }: { startedAt: number; workingMessage?: string | null; hasLiveStep: boolean; getMetrics?: () => StreamMetrics }) {
 	const { t } = useI18n();
 	const elapsed = useElapsed(startedAt, true);
 	const verb = WORKING_VERBS[Math.floor(elapsed / 3000) % WORKING_VERBS.length];
 	// 扩展可以用 setWorkingMessage 覆盖这行文案（pi 终端同款能力）；有步骤在闪光时这里只报时长
 	const label = workingMessage || (hasLiveStep ? null : `${verb}…`);
-	// 流式吞吐：用客户端实测的 token/s 与入站速率（网速）替代只显示一个累计 token 数。
-	// 同步读取、不写 state，所以不会额外触发渲染。
-	const metrics = getMetrics?.() ?? null;
-	const idleMs = metrics?.idleMs ?? 0;
-	// 没有工具在跑却长时间收不到任何数据 → 显式提示「网络等待」，把网络问题的弱反馈补上。
-	// 注意用 toolRunning 而不是 hasLiveStep：正文在流式时 hasLiveStep 也为 true，会把这个提示吞掉。
-	const stalled = metrics !== null && !toolRunning && idleMs >= NET_STALL_MS;
+	// 只报实时 token 速度（同步读取、不写 state，不额外触发渲染）；
+	// 总输出 token 不在对话里重复显示，交给底部统计条。
+	const tokensPerSecond = getMetrics?.().tokensPerSecond ?? 0;
 	return (
 		<Step kind="work" tone="live" live>
 			<div className="pw-line">
 				{label ? <span className="pw-shimmer">{label}</span> : <span className="pw-verb">{fillBold(WORKING_FOR, { d: fmtSpan(elapsed) })}</span>}
 				{label && <span className="pw-meta">{fmtSpan(elapsed)}</span>}
-				{stalled ? (
-					<span className="pw-net-wait">{t.netWaiting.replace("{d}", fmtSpan(idleMs))}</span>
-				) : metrics && metrics.tokensPerSecond > 0 ? (
-					<>
-						<span className="pw-meta" title={t.outputTokens}>↓ {fmtThroughput(metrics.tokensPerSecond)} tok/s</span>
-						{metrics.bytesPerSecond > 0 && <span className="pw-meta pw-net-rate">· {fmtBytesRate(metrics.bytesPerSecond)}</span>}
-					</>
-				) : outputTokens ? (
-					<span className="pw-meta">↓ {fmtTok(outputTokens)} tok</span>
-				) : null}
+				{tokensPerSecond > 0 && <span className="pw-meta" title={t.outputTokens}>↓ {fmtThroughput(tokensPerSecond)} tok/s</span>}
 			</div>
 		</Step>
 	);
@@ -1061,7 +1045,6 @@ function TurnBlockView({
 	retryNotice,
 	streamStartedAt,
 	runningTool,
-	outputTokens,
 	workingMessage,
 	getMetrics,
 	onFork,
@@ -1082,7 +1065,6 @@ function TurnBlockView({
 	retryNotice?: string | null;
 	streamStartedAt: number | null;
 	runningTool?: string;
-	outputTokens?: number;
 	workingMessage?: string | null;
 	getMetrics?: () => StreamMetrics;
 	onFork?: (entryId: string) => void;
@@ -1167,7 +1149,7 @@ function TurnBlockView({
 						);
 					})}
 					{isLast && retryNotice && <RetryStep text={retryNotice} />}
-					{turnLive && streamStartedAt && <WorkingStep startedAt={streamStartedAt} outputTokens={outputTokens} workingMessage={workingMessage} hasLiveStep={hasLiveStep} toolRunning={Boolean(runningTool)} getMetrics={getMetrics} />}
+					{turnLive && streamStartedAt && <WorkingStep startedAt={streamStartedAt} workingMessage={workingMessage} hasLiveStep={hasLiveStep} getMetrics={getMetrics} />}
 				</div>
 			)}
 			{finalIdx >= 0 && <FinalAnswer message={messages[finalIdx]} onFork={onFork} showActions={!isStreaming || !isLast} turnStartMs={user?.timestamp} roundBadge={roundBadge} onShowRound={onShowRound} />}
@@ -1282,13 +1264,6 @@ function fmtThroughput(tokensPerSecond: number): string {
 	return tokensPerSecond >= 10 ? String(Math.round(tokensPerSecond)) : String(Math.round(tokensPerSecond * 10) / 10);
 }
 
-/** 入站速率（网速）：B/s → KB/s → MB/s */
-function fmtBytesRate(bytesPerSecond: number): string {
-	if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
-	if (bytesPerSecond >= 1024) return `${Math.round(bytesPerSecond / 1024)} KB/s`;
-	return `${Math.round(bytesPerSecond)} B/s`;
-}
-
 export function SessionStatsBar({
 	stats,
 }: {
@@ -1320,13 +1295,13 @@ export function SessionStatsBar({
 		<div className="group relative mx-auto mt-1 block w-full px-4 pt-1 text-center">
 			<div
 				className="overflow-hidden text-ellipsis whitespace-nowrap"
-				style={{ fontSize: "var(--dsh-content-font-size-secondary, 13px)", lineHeight: "20px", color: "var(--dsw-label-caption)" }}
+				style={{ fontSize: "var(--piweb-chat-font-xs)", lineHeight: "18px", color: "var(--dsw-label-caption)" }}
 			>
 				{line}
 			</div>
 			<div
 				className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1 hidden w-max max-w-[90vw] -translate-x-1/2 rounded-xl px-3 py-2 text-left group-hover:block"
-				style={{ background: "var(--dsw-glass-popover)", border: "0.5px solid var(--dsw-border-l2)", boxShadow: "var(--dsw-elevation-soft)", fontSize: "var(--dsh-content-font-size-secondary, 13px)", lineHeight: "20px", color: "var(--dsw-label-secondary)" }}
+				style={{ background: "var(--dsw-glass-popover)", border: "0.5px solid var(--dsw-border-l2)", boxShadow: "var(--dsw-elevation-soft)", fontSize: "var(--piweb-chat-font-xs)", lineHeight: "18px", color: "var(--dsw-label-secondary)" }}
 			>
 				{line}
 			</div>
@@ -1349,7 +1324,6 @@ function turnBlockPropsEqual(prev: TurnBlockProps, next: TurnBlockProps): boolea
 		prev.retryNotice !== next.retryNotice ||
 		prev.streamStartedAt !== next.streamStartedAt ||
 		prev.runningTool !== next.runningTool ||
-		prev.outputTokens !== next.outputTokens ||
 		prev.workingMessage !== next.workingMessage ||
 		prev.contextFiles !== next.contextFiles ||
 		prev.onFork !== next.onFork ||
@@ -1723,7 +1697,6 @@ export function ChatWindow({
 										retryNotice={retryNotice}
 										streamStartedAt={streamStartedAt}
 										runningTool={runningTool}
-										outputTokens={stats?.tokens.output}
 										workingMessage={workingMessage}
 										getMetrics={getStreamMetrics}
 										onFork={onFork}
@@ -1741,7 +1714,7 @@ export function ChatWindow({
 						{/* 还没有任何消息就已在流式（极少见）：单独给一条工作指示 */}
 						{isStreaming && streamStartedAt && turns.length === 0 && (
 							<div className="pw-turn">
-								<WorkingStep startedAt={streamStartedAt} outputTokens={stats?.tokens.output} workingMessage={workingMessage} getMetrics={getStreamMetrics} hasLiveStep={Boolean(runningTool)} toolRunning={Boolean(runningTool)} />
+								<WorkingStep startedAt={streamStartedAt} workingMessage={workingMessage} getMetrics={getStreamMetrics} hasLiveStep={Boolean(runningTool)} />
 							</div>
 						)}
 						{/* 重连提示：跟随消息流显示在最后一条输出下面 */}

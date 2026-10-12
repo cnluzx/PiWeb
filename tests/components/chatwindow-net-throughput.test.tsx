@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * 流式「正在输出」指示：末尾不再是只显示一个累计 token 数，而是实时 token/s（+网速）；
- * 长时间收不到数据（且没有工具在跑）时显式给出「网络等待」，补上网络问题的弱反馈。
+ * 流式「正在输出」指示：末尾只显示实时 token 速度（token/s）。
+ * 不再显示总输出 token（交给底部统计条），也不再显示网速 / 「网络等待」。
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -27,7 +27,7 @@ function getMetrics(overrides: Partial<StreamMetrics>): () => StreamMetrics {
 }
 
 describe("流式吞吐指示", () => {
-	it("显示实时 token/s 与入站速率（网速）", async () => {
+	it("只显示实时 token/s，不显示网速与网络等待", async () => {
 		const { container } = render(
 			<ChatWindow
 				messages={[streaming]}
@@ -37,18 +37,22 @@ describe("流式吞吐指示", () => {
 			/>,
 		);
 		await waitFor(() => expect(container.textContent).toContain("42 tok/s"), { timeout: READY_TIMEOUT_MS });
-		expect(container.textContent).toContain("128 KB/s");
+		expect(container.textContent).not.toContain("KB/s");
+		expect(container.textContent).not.toContain("网络等待");
 	});
 
-	it("长时间没有数据且无工具在跑时显示「网络等待」", async () => {
+	it("速率为 0 时不显示 token 数字，也不显示网络等待", async () => {
 		const { container } = render(
 			<ChatWindow
 				messages={[streaming]}
 				tools={{}}
 				isStreaming
-				getStreamMetrics={getMetrics({ idleMs: 5000, active: false })}
+				getStreamMetrics={getMetrics({ idleMs: 8000, active: false })}
 			/>,
 		);
-		await waitFor(() => expect(container.textContent).toContain("网络等待 5s"), { timeout: READY_TIMEOUT_MS });
+		// 等指示器出现（有英文状态词），确认组件确实渲染了
+		await waitFor(() => expect(container.textContent).toContain("Working for"), { timeout: READY_TIMEOUT_MS });
+		expect(container.textContent).not.toContain("tok/s");
+		expect(container.textContent).not.toContain("网络等待");
 	});
 });

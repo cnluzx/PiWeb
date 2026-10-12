@@ -1181,33 +1181,6 @@ button.pw-line:hover {
 	white-space: nowrap;
 }
 
-/* 流式吞吐：卡顿时的「网络等待」用琥珀色 + 呼吸小圆点，比灰色小字醒目 */
-.pw-net-wait {
-	display: inline-flex;
-	align-items: center;
-	gap: 5px;
-	flex: none;
-	font-size: var(--piweb-chat-font-t);
-	color: var(--dsw-warn);
-	white-space: nowrap;
-}
-.pw-net-wait::before {
-	content: "";
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: currentColor;
-	animation: pw-net-pulse 1.2s ease-in-out infinite;
-}
-@keyframes pw-net-pulse {
-	0%, 100% { opacity: 0.25; transform: scale(0.85); }
-	50% { opacity: 1; transform: scale(1); }
-}
-/* 入站速率（网速）：比 token/s 更弱一档 */
-.pw-net-rate {
-	color: var(--dsw-label-caption);
-	opacity: 0.75;
-}
 .pw-line .pw-chev {
 	flex: none;
 	color: var(--dsw-label-caption);
